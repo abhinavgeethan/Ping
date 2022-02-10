@@ -20,6 +20,16 @@ packets_rcvd=0
 # forceV4=True
 # setTTL=None
 # tries=None
+def int_range(minval:int,maxval:int):
+    def checker(arg):
+        try:
+            i=int(arg)
+        except ValueError:
+            raise argparse.ArgumentTypeError("must be an integer.")
+        if i<minval or i>maxval:
+            raise argparse.ArgumentTypeError(f"must be in range [{minval}-{maxval}].")
+        return i
+    return checker
 
 def calc_checksum(data_string:bytes)->int:
     limit=(int(len(data_string)/2)*2)
@@ -81,16 +91,16 @@ def make_packet(isIPV6:bool,packet_size:int=32)->bytes:
 def ping_once(dest_ip:str,isIPV6:bool,*args,**kwargs):
     global packets_sent
     global packets_rcvd
-    local_timeout=(kwargs.get('timeout') or 1)*1000*(10**-3)
+    local_timeout=(kwargs.get('timeout') or 1000)*(10**-3)
     if isIPV6:
         sock=socket.socket(socket.AF_INET6,socket.SOCK_RAW,socket.getprotobyname("ipv6-icmp"))
     else:
         sock=socket.socket(socket.AF_INET,socket.SOCK_RAW,socket.getprotobyname("icmp"))
     setTTL=kwargs.get('ttl') or None
     if setTTL!=None:
-        print("Set TTL to: ",setTTL)
         sock.setsockopt(socket.IPPROTO_IP,socket.IP_TTL,setTTL)
-    packet=make_packet(isIPV6)
+    packet_size=kwargs.get('packet_size') or 32
+    packet=make_packet(isIPV6,packet_size)
     startTime=time.time()
     try:
         if isIPV6:
@@ -227,7 +237,7 @@ def ping(dest_ip:str,forceV4:bool=False,forceV6:bool=False,*args,**kwargs):
         print(f"Pinging {dest_name} [{dest_ip}] with {packet_size} bytes of data:")
     else:
         print(f"Pinging {dest_ip} with {packet_size} bytes of data:")
-    if tries!=None:
+    if tries!=-1:
         for i in range(tries):
             time.sleep(1)
             ping_once(dest_ip=dest_ip,isIPV6=isIPV6,**kwargs)
@@ -239,4 +249,18 @@ def ping(dest_ip:str,forceV4:bool=False,forceV6:bool=False,*args,**kwargs):
             except KeyboardInterrupt:
                 break
     print_stats(dest_ip=dest_ip)
-ping("google.ga")
+
+if __name__=="__main__":
+    parser=argparse.ArgumentParser(prog="main",description="Ping command implemented in Python for CN Assignment. - Abhinav Geethan",epilog="Only works on Windows machines.\nRun as administrator if permission errors are encountered.")
+    parser.add_argument(dest="dest_ip",type=str,metavar="Destination_Host",help="IP or name address of host to be pinged.")
+    count_group=parser.add_mutually_exclusive_group()
+    count_group.add_argument("-t",dest="tries",action="store_const",const=-1,help="Ping host until stopped.\nTo stop enter: CTRL+C")
+    count_group.add_argument("-n",dest="tries",metavar="count",default=4,type=int_range(1,1000),help="Number of echo requests to send. Default is 4.")
+    parser.add_argument("-i","--ttl",dest="ttl",metavar="TTL",default=None,type=int_range(1,255),help="Specify (TTL) Time To Live of packets sent. IPv4 only.")
+    parser.add_argument("-w",dest="timeout",metavar="timeout",default=1000,type=int_range(1,60000),help="Timeout in milliseconds to wait for each reply. Default is 1000.")
+    parser.add_argument("-l",dest="packet_size",metavar="size",default=32,type=int_range(1,255),help="Send buffer size. Default is 32.")
+    force_proto_group=parser.add_mutually_exclusive_group()
+    force_proto_group.add_argument("-4",dest="forceV4",action="store_true",help="Force ping to use IPv4 protocol. [Default]")
+    force_proto_group.add_argument("-6",dest="forceV6",action="store_true",help="Force ping to use IPv6 protocol.")
+    args=parser.parse_args()
+    ping(args.dest_ip,forceV4=args.forceV4,forceV6=args.forceV6,ttl=args.ttl,tries=args.tries,timeout=args.timeout,packet_size=args.packet_size)
