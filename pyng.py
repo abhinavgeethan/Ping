@@ -1,26 +1,22 @@
-import struct
-import os
-import socket
-import time
-import re
-import select
-import argparse
+# Importing required libraries
+import struct   # For parsing and constructing bytearrays
+import os       # For getting ProcessID to use as unique ID while sending packets.
+import socket   # For socket communication
+import time     # For measuring timeouts and delay
+import re       # For triggering DNS lookup of hostnames
+import select   # For awaiting socket
+import argparse # For parsing input arguments
 
-self_id=os.getpid() & 0xFFFF
-duration=[]
-packets_sent=0
-packets_rcvd=0
-# seq_num=0
-# packet_size=32
-# dest_ip="google.ga"
-# dest_name=None
-# timeout=1000*(10**-3)
-# isIPV6=False
-# forceV6=False
-# forceV4=True
-# setTTL=None
-# tries=None
+SELF_ID=os.getpid() & 0xFFFF
+duration=[]    # Time taken by each packet
+packets_sent=0 # Total packets sent
+packets_rcvd=0 # Total packets received
+
+# Helper Type function for numeric input argument parsing
 def int_range(minval:int,maxval:int):
+    # Returns function to be used as type in argparser.
+    # Checks if the given argument is an integer and if it is in the
+    # range specified by the minval and maxval
     def checker(arg):
         try:
             i=int(arg)
@@ -31,6 +27,22 @@ def int_range(minval:int,maxval:int):
         return i
     return checker
 
+# Generates ArgumentParser for input parsing
+def make_arg_parser()->argparse.ArgumentParser:
+    parser=argparse.ArgumentParser(prog="pyng",description="Ping command implemented in Python for CN Assignment. - Abhinav Geethan",epilog="Only works on Windows machines.\nRun as administrator if permission errors are encountered.")
+    parser.add_argument(dest="dest_ip",type=str,metavar="Destination_Host",help="IP or name address of host to be pinged.")
+    count_group=parser.add_mutually_exclusive_group()
+    count_group.add_argument("-t",dest="tries",action="store_const",const=-1,help="Ping host until stopped.\nTo stop enter: CTRL+C")
+    count_group.add_argument("-n",dest="tries",metavar="count",default=4,type=int_range(1,1000),help="Number of echo requests to send. Default is 4.")
+    parser.add_argument("-i","--ttl",dest="ttl",metavar="TTL",default=None,type=int_range(1,255),help="Specify (TTL) Time To Live of packets sent. IPv4 only.")
+    parser.add_argument("-w",dest="timeout",metavar="timeout",default=2000,type=int_range(1,60000),help="Timeout in milliseconds to wait for each reply. Default is 1000.")
+    parser.add_argument("-l",dest="packet_size",metavar="size",default=32,type=int_range(1,255),help="Send buffer size. Default is 32.")
+    force_proto_group=parser.add_mutually_exclusive_group()
+    force_proto_group.add_argument("-4",dest="forceV4",action="store_true",help="Force ping to use IPv4 protocol. [Default]")
+    force_proto_group.add_argument("-6",dest="forceV6",action="store_true",help="Force ping to use IPv6 protocol.")
+    return parser
+
+# Helper function for calculating checksum of packet
 def calc_checksum(data_string:bytes)->int:
     limit=(int(len(data_string)/2)*2)
     sum=0
@@ -53,54 +65,81 @@ def calc_checksum(data_string:bytes)->int:
     ret=socket.htons(ret)
     return ret
 
-def get_TTL(icmp_packet)->int:
+# Parses response IP header to get TTL of reply 
+def get_TTL(icmp_packet:bytes)->int:
+    # Unpacking response header
     icmp_header=struct.unpack("!BBHHH",icmp_packet[20:28])
-    if icmp_header[3]==self_id:
+    # Checking if packet is in response to our ICMP Echo Request
+    if icmp_header[3]==SELF_ID:
+        # Unpacking IP header from packet
         ip_header=struct.unpack("!BBHHHBBHII",icmp_packet[:20])
+        # Returning TTL value of packet
         return ip_header[5]
 
-def get_ID(icmp_packet)->int:
+# Parses response header to get ID. Only used for IPv6 since header is checked in get_TTL for IPv4.
+def get_ID(icmp_packet:bytes)->int:
+    # Unpacking response header
     icmp_header=struct.unpack("!BBHHH",icmp_packet[20:28])
+    # Returning ID of packet 
     return icmp_header[3]
 
+# Constructs packet with dummy payload
 def make_packet(isIPV6:bool,packet_size:int=32)->bytes:
+    # Leaving sequence number as 0 for each packet since
+    # they are being sent in 1 second intervals
     seq_num=0
+
     # Psuedo Header
+    # Checksum needs to be a part of the header eventually,
+    # so a psuedo header with checksum=0 but accurate values
+    # for other fields is used to calculate it.
     if isIPV6:
-        header=struct.pack("!BBHHH",128,0,0,self_id,seq_num)
+        header=struct.pack("!BBHHH",128,0,0,SELF_ID,seq_num)
     else:
-        header=struct.pack("!BBHHH",8,0,0,self_id,seq_num)
+        header=struct.pack("!BBHHH",8,0,0,SELF_ID,seq_num)
     
-    # Data Gen
-    padding=[]
+    # Generating dummy data of specified packet size to be sent
+    dummy=[]
     startVal=0x42
     for i in range(startVal,startVal+packet_size):
-        padding+=[(i&0xff)]
-    data=bytes(padding)
+        dummy+=[(i&0xff)]
+    data=bytes(dummy)
     
     # Calculating Checksum
     checksum=calc_checksum(header+data)
+    
     # Actual Header with Checksum
     if isIPV6:
-        header=struct.pack("!BBHHH",128,0,checksum,self_id,seq_num)
+        header=struct.pack("!BBHHH",128,0,checksum,SELF_ID,seq_num)
     else:
-        header=struct.pack("!BBHHH",8,0,checksum,self_id,seq_num)
+        header=struct.pack("!BBHHH",8,0,checksum,SELF_ID,seq_num)
+    
+    # Returning packet
     packet=header+data
     return packet
 
-def ping_once(dest_ip:str,isIPV6:bool,*args,**kwargs):
+# Sends and receives one ICMP packet
+def ping_once(dest_ip:str,isIPV6:bool,*args,**kwargs)->None:
     global packets_sent
     global packets_rcvd
     local_timeout=(kwargs.get('timeout') or 1000)*(10**-3)
+    packet_size=kwargs.get('packet_size') or 32
+    
+    # Creating ICMP socket
     if isIPV6:
         sock=socket.socket(socket.AF_INET6,socket.SOCK_RAW,socket.getprotobyname("ipv6-icmp"))
     else:
         sock=socket.socket(socket.AF_INET,socket.SOCK_RAW,socket.getprotobyname("icmp"))
+    
+    # Setting TTL to specified amount or defaults to OS default
     setTTL=kwargs.get('ttl') or None
     if setTTL!=None:
         sock.setsockopt(socket.IPPROTO_IP,socket.IP_TTL,setTTL)
-    packet_size=kwargs.get('packet_size') or 32
+    
+    # Construct echo request packet with dummy data of specified size
     packet=make_packet(isIPV6,packet_size)
+    
+    # Sending request
     startTime=time.time()
     try:
         if isIPV6:
@@ -111,36 +150,51 @@ def ping_once(dest_ip:str,isIPV6:bool,*args,**kwargs):
     except socket.gaierror:
         print(f"Could not find host {dest_ip}.[HOST_UNREACHABLE]")
         exit()
+    
     # Receive Packet
     resp_packet=None
     endtime=None
     addr=None
-    while True:
+    # Loop times out according to specified timeout amount or
+    # defaults to 1 second
+    while not resp_packet:
         select_start_time=time.time()
         selected=select.select([sock,],[],[],local_timeout)
-        select_time=time.time()-select_start_time
-        if selected[0]==[]:
-            print("Request timed out.")
+        select_time=(time.time()-select_start_time)
+        local_timeout-=select_time
+        
+        if not selected[0]:
+            print("Request timed out. [select]")
+            print(selected)
             return
+        
+        # Reading received response
         resp_packet,addr=sock.recvfrom(2048)
-        if not isIPV6:
-            ttl=get_TTL(resp_packet)
-            break
-        elif get_ID(resp_packet)==self_id:continue
-        local_timeout=local_timeout-select_time
+        
+        # Reading TTL from IP for IPv4 response
+        if resp_packet:
+            if not isIPV6:
+                ttl=get_TTL(resp_packet)
+                break
+            elif not get_ID(resp_packet)==SELF_ID:continue
         if local_timeout<=0:break
+    
     if not resp_packet and not addr:
         print("Request timed out.")
         return
+    
+    # Measuring time taken (RTT)
     endtime=time.time()
     time_taken=int((endtime-startTime)*1000)
     duration.append(time_taken)
     packets_rcvd+=1
+    
     if isIPV6:
         print(f"Reply from {addr[0]}: time={time_taken}ms")
     else:
         print(f"Reply from {addr[0]}: bytes={len(resp_packet)-28} time={time_taken}ms TTL={ttl}")
 
+# Prints overall statistics
 def print_stats(dest_ip:str)->None:
     print(f"\nPing statistics for {dest_ip}:")
     print(f"\tPackets: Sent = {packets_sent}, Received = {packets_rcvd}, Lost = {packets_sent-packets_rcvd} ({int(((packets_sent-packets_rcvd)/packets_sent)*100)}% loss)")
@@ -149,21 +203,28 @@ def print_stats(dest_ip:str)->None:
     print(f"\tMinimum = {min(duration)}ms, Maximum = {max(duration)}ms, Average = {int(sum(duration)/len(duration))}ms")
     return
 
-def ping(dest_ip:str,forceV4:bool=False,forceV6:bool=False,*args,**kwargs):
+# Handles input options and triggers ping_once
+def ping(dest_ip:str,forceV4:bool=False,forceV6:bool=False,*args,**kwargs)->None:
     isIPV6=True if ':' in dest_ip else False
     tries=kwargs.get('tries') or 4
     dest_name=None
     packet_size=kwargs.get("packet_size") or 32
+    
+    # Force IPv4 or IPv6 - if specified
+    # Defaults to IPv4
     if forceV4 or forceV6:
         if forceV4 and forceV6:
             print("Cannot force IPv4 and IPv6 together.")
             exit()
+        
+        # DNS lookup to find available IPs
         try:
             addr_info=socket.getaddrinfo(dest_ip,None)
         except socket.gaierror as err:
             print(f"Could not find host {dest_ip}.[ADDR_INFO ERROR]")
             exit()
-        # print(addr_info)
+        
+        # Reading IPv4 and IPv6 (if any) addresses from lookup
         v4_IP=None
         v6_IP=None
         for options in addr_info:
@@ -177,6 +238,7 @@ def ping(dest_ip:str,forceV4:bool=False,forceV6:bool=False,*args,**kwargs):
                 v6_IP=curr_IP
             else:
                 v4_IP=curr_IP
+        
         if v4_IP==None and v6_IP==None:
                 print("Address could not be resolved.")
                 exit()
@@ -196,34 +258,8 @@ def ping(dest_ip:str,forceV4:bool=False,forceV6:bool=False,*args,**kwargs):
                 dest_name=dest_ip
                 dest_ip=v4_IP
                 isIPV6=False
-        # if len(addr_info)==1 and forceV6:
-        #     print("Host does not support IPv6.")
-        # elif len(addr_info)==1 and forceV4:
-        #     try:
-        #         v4_IP=addr_info[0][4][0]
-        #     except:
-        #         print("Address could not be resolved.")
-        #         raise
-        #         exit()
-        #     dest_name=dest_ip
-        #     dest_ip=v4_IP
-        #     isIPV6=False
-        # else:
-        #     try:
-        #         v4_IP=addr_info[1][4][0]
-        #         v6_IP=addr_info[0][4][0]
-        #     except:
-        #         print("Address could not be resolved.")
-        #         raise
-        #         exit()
-        #     if forceV4 and v4_IP:
-        #         dest_name=dest_ip
-        #         dest_ip=v4_IP
-        #         isIPV6=False
-        #     if forceV6 and v6_IP:
-        #         dest_name=dest_ip
-        #         dest_ip=v6_IP
-        #         isIPV6=True
+    
+    # DNS Lookup for hostnames [purely cosmetic]
     has_letters=re.search("[a-z]",dest_ip)
     if has_letters and len(has_letters[0])>0 and not isIPV6:
         dest_name=dest_ip
@@ -237,30 +273,27 @@ def ping(dest_ip:str,forceV4:bool=False,forceV6:bool=False,*args,**kwargs):
         print(f"Pinging {dest_name} [{dest_ip}] with {packet_size} bytes of data:")
     else:
         print(f"Pinging {dest_ip} with {packet_size} bytes of data:")
+    
+    # Attempt ping
+    # No. of attempts specified by input, defaults to 4.
+    # -1 for continous ping until interrupted.
     if tries!=-1:
         for i in range(tries):
             time.sleep(1)
             ping_once(dest_ip=dest_ip,isIPV6=isIPV6,**kwargs)
     else: 
+        # Ping until interrupted
         while True:
             try:
                 time.sleep(1)
                 ping_once(dest_ip=dest_ip,isIPV6=isIPV6,**kwargs)
             except KeyboardInterrupt:
                 break
+    
+    # Printing statistics report
     print_stats(dest_ip=dest_ip)
 
 if __name__=="__main__":
-    parser=argparse.ArgumentParser(prog="main",description="Ping command implemented in Python for CN Assignment. - Abhinav Geethan",epilog="Only works on Windows machines.\nRun as administrator if permission errors are encountered.")
-    parser.add_argument(dest="dest_ip",type=str,metavar="Destination_Host",help="IP or name address of host to be pinged.")
-    count_group=parser.add_mutually_exclusive_group()
-    count_group.add_argument("-t",dest="tries",action="store_const",const=-1,help="Ping host until stopped.\nTo stop enter: CTRL+C")
-    count_group.add_argument("-n",dest="tries",metavar="count",default=4,type=int_range(1,1000),help="Number of echo requests to send. Default is 4.")
-    parser.add_argument("-i","--ttl",dest="ttl",metavar="TTL",default=None,type=int_range(1,255),help="Specify (TTL) Time To Live of packets sent. IPv4 only.")
-    parser.add_argument("-w",dest="timeout",metavar="timeout",default=1000,type=int_range(1,60000),help="Timeout in milliseconds to wait for each reply. Default is 1000.")
-    parser.add_argument("-l",dest="packet_size",metavar="size",default=32,type=int_range(1,255),help="Send buffer size. Default is 32.")
-    force_proto_group=parser.add_mutually_exclusive_group()
-    force_proto_group.add_argument("-4",dest="forceV4",action="store_true",help="Force ping to use IPv4 protocol. [Default]")
-    force_proto_group.add_argument("-6",dest="forceV6",action="store_true",help="Force ping to use IPv6 protocol.")
+    parser=make_arg_parser()
     args=parser.parse_args()
     ping(args.dest_ip,forceV4=args.forceV4,forceV6=args.forceV6,ttl=args.ttl,tries=args.tries,timeout=args.timeout,packet_size=args.packet_size)
