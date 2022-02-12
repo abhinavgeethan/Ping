@@ -6,6 +6,7 @@ import time     # For measuring timeouts and delay
 import re       # For triggering DNS lookup of hostnames
 import select   # For awaiting socket
 import argparse # For parsing input arguments
+import sys      # For showing Usage by default
 
 SELF_ID=os.getpid() & 0xFFFF
 duration=[]    # Time taken by each packet
@@ -14,9 +15,11 @@ packets_rcvd=0 # Total packets received
 
 # Helper Type function for numeric input argument parsing
 def int_range(minval:int,maxval:int):
-    # Returns function to be used as type in argparser.
-    # Checks if the given argument is an integer and if it is in the
-    # range specified by the minval and maxval
+    """
+    Returns function to be used as type in argparser.
+    Checks if the given argument is an integer and if it is in the
+    range specified by the minval and maxval.
+    """
     def checker(arg):
         try:
             i=int(arg)
@@ -44,24 +47,42 @@ def make_arg_parser()->argparse.ArgumentParser:
 
 # Helper function for calculating checksum of packet
 def calc_checksum(data_string:bytes)->int:
-    limit=(int(len(data_string)/2)*2)
-    sum=0
-    ctr=0
+    # Uses Deferred Carries Method
+    """
+    As per RFC1071 [Section 2: (1)]:
+        "Deferred Carries:
+            ...
+            One approach is to sum 16-bit words in a 32-bit accumulator, so
+            the overflows build up in the high-order 16 bits.
+            ..."
+
+    """
+    sum=0 # Used as 32-bit Accumulator
     low=0
     high=0
+    ctr=0
+    limit=(int(len(data_string)/2)*2)
+    # Adding 16bits at a time
     while ctr<limit:
-        # Works only on Windows Machines
+        """
+        Suitable for little-endian machines but as per RFC1071 [Section 2: (A)],
+        checksum calculation should be byte-order independent.
+        """
         low=chr(data_string[ctr])
         high=chr(data_string[ctr+1])
         sum+=(ord(high)*256+ord(low))
         ctr+=2
+    # Adding last byte if odd length
     if limit<len(data_string):
         low=data_string[len(data_string)-1]
         sum+=ord(low)
-    sum&=0xffffffff
+    sum&=0xffffffff # To avoid overflow (rare)
+    # Folding 32-bit to 16-bits
     sum= (sum>>16)+(sum&0xffff)
     sum+=sum>>16
-    ret=~sum&0xffff
+    # One's complement
+    ret=~sum&0xffff # Inverting and truncating to 16bits
+    # Retuen as bytes
     ret=socket.htons(ret)
     return ret
 
@@ -85,14 +106,18 @@ def get_ID(icmp_packet:bytes)->int:
 
 # Constructs packet with dummy payload
 def make_packet(isIPV6:bool,packet_size:int=32)->bytes:
-    # Leaving sequence number as 0 for each packet since
-    # they are being sent in 1 second intervals
+    """
+    Leaving sequence number as 0 for each packet since
+    they are being sent in 1 second intervals.
+    """
     seq_num=0
 
     # Psuedo Header
-    # Checksum needs to be a part of the header eventually,
-    # so a psuedo header with checksum=0 but accurate values
-    # for other fields is used to calculate it.
+    """
+    Checksum needs to be a part of the header eventually,
+    so a psuedo header with checksum=0 but accurate values
+    for other fields is used to calculate it.
+    """
     if isIPV6:
         header=struct.pack("!BBHHH",128,0,0,SELF_ID,seq_num)
     else:
@@ -155,8 +180,10 @@ def ping_once(dest_ip:str,isIPV6:bool,*args,**kwargs)->None:
     resp_packet=None
     endtime=None
     addr=None
-    # Loop times out according to specified timeout amount or
-    # defaults to 1 second
+    """
+    Loop times out according to specified timeout amount or
+    defaults to 1 second.
+    """
     while not resp_packet:
         select_start_time=time.time()
         selected=select.select([sock,],[],[],local_timeout)
@@ -275,8 +302,10 @@ def ping(dest_ip:str,forceV4:bool=False,forceV6:bool=False,*args,**kwargs)->None
         print(f"Pinging {dest_ip} with {packet_size} bytes of data:")
     
     # Attempt ping
-    # No. of attempts specified by input, defaults to 4.
-    # -1 for continous ping until interrupted.
+    """
+    No. of attempts specified by input, defaults to 4.
+    -1 for continous ping until interrupted.
+    """
     if tries!=-1:
         for i in range(tries):
             time.sleep(1)
@@ -295,5 +324,8 @@ def ping(dest_ip:str,forceV4:bool=False,forceV6:bool=False,*args,**kwargs)->None
 
 if __name__=="__main__":
     parser=make_arg_parser()
+    if len(sys.argv)==1:
+        parser.print_help()
+        exit()
     args=parser.parse_args()
     ping(args.dest_ip,forceV4=args.forceV4,forceV6=args.forceV6,ttl=args.ttl,tries=args.tries,timeout=args.timeout,packet_size=args.packet_size)
