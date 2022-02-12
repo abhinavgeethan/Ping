@@ -21,11 +21,17 @@ py pyng.py google.com -n 5 -6
 2.  ### Run
 
     ```bash
-    py pyng.py [hostname]
+    py pyng.py <hostname>
     ```
 
     You may be required to run as administrator.
     If you don't have Python installed visit the [official website](https://www.python.org/downloads/).
+
+    #### Usage
+
+    ```bash
+    pyng.py [-h] [-t | -n count] [-i TTL] [-w timeout] [-l size] [-4 | -6] Destination_Host
+    ```
 
 ## Options
 

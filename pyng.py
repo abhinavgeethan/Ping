@@ -32,7 +32,7 @@ def int_range(minval:int,maxval:int):
 
 # Generates ArgumentParser for input parsing
 def make_arg_parser()->argparse.ArgumentParser:
-    parser=argparse.ArgumentParser(prog="pyng",description="Ping command implemented in Python for CN Assignment. - Abhinav Geethan",epilog="Only works on Windows machines.\nRun as administrator if permission errors are encountered.")
+    parser=argparse.ArgumentParser(prog="pyng",description="Ping command implemented in Python for CN Assignment. - Abhinav Geethan",epilog="Some features may only work on Windows machines.\nRun as administrator if permission errors are encountered.")
     parser.add_argument(dest="dest_ip",type=str,metavar="Destination_Host",help="IP or name address of host to be pinged.")
     count_group=parser.add_mutually_exclusive_group()
     count_group.add_argument("-t",dest="tries",action="store_const",const=-1,help="Ping host until stopped.\nTo stop enter: CTRL+C")
